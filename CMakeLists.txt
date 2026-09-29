@@ -25,7 +25,14 @@ find_package(OpenCV REQUIRED)
 find_package(Ceres REQUIRED)
 
 find_package(OpenMP REQUIRED)
-find_package(GTSAM REQUIRED QUIET)
+# Pin GTSAM to the separately installed 4.1.1 package. NO_DEFAULT_PATH keeps
+# CMake from silently falling back to the older /usr/local installation.
+set(GTSAM_DIR "/opt/gtsam-4.1.1/lib/cmake/GTSAM" CACHE PATH "GTSAM package directory" FORCE)
+find_package(GTSAM 4.1.1 EXACT REQUIRED CONFIG
+  PATHS "${GTSAM_DIR}"
+  NO_DEFAULT_PATH
+)
+message(STATUS "Using GTSAM ${GTSAM_VERSION_STRING} from ${GTSAM_DIR}")
 find_package(teaserpp REQUIRED)
 find_package(TBB REQUIRED)
 

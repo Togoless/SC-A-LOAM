@@ -25,14 +25,14 @@ color_table_len = color_table.shape[0]
 # User only consider this block
 ##########################
 
-data_dir = "../sample_data/Seosan01/" # should end with / 
-scan_idx_range_to_stack = [0, 20] # if you want a whole map, use [0, len(scan_files)]
+data_dir = "/home/gy-zb-a-tuyuyang/code/lio/super_m_lio_ws/src/data/" # should end with / 
+scan_idx_range_to_stack = [0, 1358] # if you want a whole map, use [0, len(scan_files)]
 node_skip = 1
 
 num_points_in_a_scan = 150000 # for reservation (save faster) // e.g., use 150000 for 128 ray lidars, 100000 for 64 ray lidars, 30000 for 16 ray lidars, if error occured, use the larger value.
 
 is_live_vis = False # recommend to use false 
-is_o3d_vis = True
+is_o3d_vis = False
 intensity_color_max = 200
 
 is_near_removal = True

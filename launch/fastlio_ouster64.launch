@@ -21,9 +21,6 @@
     <!-- <param name="sc_max_radius" type="double" value="40.0"/> 20 or 40 for indoor -->
     <param name="sc_max_radius" type="double" value="80.0"/> <!-- for outdoor -->
 
-    <!-- for MulRan -->
-    <param name="lidar_type" type="string" value="OS1-64"/>
-
     <!-- input -->
     <remap from="/aft_mapped_to_init" to="/lio/odom"/>
     <remap from="/velodyne_cloud_registered_local" to="/lio/cloud_undistorted_imu"/>
