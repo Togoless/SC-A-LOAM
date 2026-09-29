@@ -401,7 +401,12 @@ void pubPath( void )
     q.setY(odomAftPGO.pose.pose.orientation.y);
     q.setZ(odomAftPGO.pose.pose.orientation.z);
     transform.setRotation(q);
-    br.sendTransform(tf::StampedTransform(transform, odomAftPGO.header.stamp, "/camera_init", "/aft_pgo"));
+    const ros::Time tf_stamp = ros::Time::now();
+    static ros::Time last_tf_stamp;
+    if (!tf_stamp.isZero() && tf_stamp != last_tf_stamp) {
+        br.sendTransform(tf::StampedTransform(transform, tf_stamp, "/camera_init", "/aft_pgo"));
+        last_tf_stamp = tf_stamp;
+    }
 } // pubPath
 
 void updatePoses(void)
@@ -548,7 +553,7 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
 
 void process_pg()
 {
-    while(1)
+    while(ros::ok())
     {
 		while ( !odometryBuf.empty() && !fullResBuf.empty() )
         {
@@ -742,7 +747,7 @@ void process_lcd(void)
 
 void process_icp(void)
 {
-    while(1)
+    while(ros::ok())
     {
 		while ( !scLoopICPBuf.empty() )
         {
@@ -822,8 +827,10 @@ void pubMap(void)
     }
     mKF.unlock(); 
 
+    pcl::PointCloud<PointType>::Ptr filteredMap(new pcl::PointCloud<PointType>());
     downSizeFilterMapPGO.setInputCloud(laserCloudMapPGO);
-    downSizeFilterMapPGO.filter(*laserCloudMapPGO);
+    downSizeFilterMapPGO.filter(*filteredMap);
+    laserCloudMapPGO.swap(filteredMap);
 
     sensor_msgs::PointCloud2 laserCloudMapPGOMsg;
     pcl::toROSMsg(*laserCloudMapPGO, laserCloudMapPGOMsg);
@@ -914,6 +921,13 @@ int main(int argc, char **argv)
 	std::thread viz_path {process_viz_path}; // visualization - path (high frequency)
 
  	ros::spin();
+
+    posegraph_slam.join();
+    lc_detection.join();
+    icp_calculation.join();
+    isam_update.join();
+    viz_map.join();
+    viz_path.join();
 
 	return 0;
 }

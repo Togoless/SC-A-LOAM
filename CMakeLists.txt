@@ -26,6 +26,46 @@ find_package(Ceres REQUIRED)
 
 find_package(OpenMP REQUIRED)
 find_package(GTSAM REQUIRED QUIET)
+find_package(teaserpp REQUIRED)
+find_package(TBB REQUIRED)
+
+# Build the vendored small_gicp core only. Keep its optional PCL tools and
+# standalone utilities out of the catkin build.
+set(BUILD_HELPER ON CACHE BOOL "" FORCE)
+set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+set(BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
+set(BUILD_WITH_PCL OFF CACHE BOOL "" FORCE)
+set(BUILD_WITH_TBB ON CACHE BOOL "" FORCE)
+add_subdirectory(third_party/small_gicp EXCLUDE_FROM_ALL)
+
+# Build the vendored Quatro module directly. Avoid nesting its catkin_package()
+# call inside SC-PGO while keeping the documented quattro_module.h API.
+add_library(quatro
+  third_party/Quatro/src/fpfh.cc
+  third_party/Quatro/src/matcher.cc
+  third_party/Quatro/src/quatro_module.cc
+)
+target_include_directories(quatro PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/Quatro/include>
+)
+include(ProcessorCount)
+ProcessorCount(QUATRO_PROC_NUM)
+if(NOT QUATRO_PROC_NUM OR QUATRO_PROC_NUM LESS 1)
+  set(QUATRO_PROC_NUM 1)
+endif()
+target_compile_definitions(quatro PRIVATE
+  TBB_EN
+  TBB_PROC_NUM=${QUATRO_PROC_NUM}
+)
+target_link_libraries(quatro PUBLIC
+  ${PCL_LIBRARIES}
+  teaserpp::teaser_registration
+  teaserpp::teaser_io
+  TBB::tbb
+  OpenMP::OpenMP_CXX
+)
 
 include_directories(
   include
@@ -42,16 +82,6 @@ catkin_package(
   INCLUDE_DIRS include
 )
 
-
-add_executable(ascanRegistration src/scanRegistration.cpp)
-target_link_libraries(ascanRegistration ${catkin_LIBRARIES} ${PCL_LIBRARIES})
-
-add_executable(alaserOdometry src/laserOdometry.cpp)
-target_link_libraries(alaserOdometry ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${CERES_LIBRARIES})
-
-add_executable(alaserMapping src/laserMapping.cpp)
-target_link_libraries(alaserMapping ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${CERES_LIBRARIES})
-
 add_executable(alaserPGO 
   src/laserPosegraphOptimization.cpp
   include/scancontext/Scancontext.cpp
@@ -63,10 +93,9 @@ target_link_libraries(alaserPGO
   ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${CERES_LIBRARIES}
   ${OpenMP_CXX_FLAGS}
   gtsam
+  quatro
+  small_gicp
 )
-
-add_executable(kittiHelper src/kittiHelper.cpp)
-target_link_libraries(kittiHelper ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS})
 
 
 
