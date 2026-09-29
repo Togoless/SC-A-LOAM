@@ -21,6 +21,17 @@
     <!-- <param name="sc_max_radius" type="double" value="40.0"/> 20 or 40 for indoor -->
     <param name="sc_max_radius" type="double" value="80.0"/> <!-- for outdoor -->
 
+    <!-- Loop registration: direct GICP, with Quatro + GICP fallback -->
+    <param name="loop_gicp_downsample_resolution" type="double" value="0.4"/>
+    <param name="loop_gicp_max_correspondence_distance" type="double" value="3.0"/>
+    <param name="loop_gicp_max_rmse" type="double" value="0.5"/>
+    <param name="loop_gicp_min_overlap" type="double" value="0.25"/>
+    <param name="loop_gicp_min_inliers" type="int" value="50"/>
+    <param name="loop_gicp_max_iterations" type="int" value="64"/>
+    <param name="loop_gicp_num_threads" type="int" value="4"/>
+    <param name="loop_gicp_max_correction_translation" type="double" value="10.0"/>
+    <param name="loop_gicp_max_correction_rotation_deg" type="double" value="45.0"/>
+
     <!-- input -->
     <remap from="/aft_mapped_to_init" to="/lio/odom"/>
     <remap from="/velodyne_cloud_registered_local" to="/lio/cloud_undistorted_imu"/>

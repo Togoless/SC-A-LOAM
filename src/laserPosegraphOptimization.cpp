@@ -16,7 +16,6 @@
 #include <pcl/common/common.h>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/extract_indices.h>
-#include <pcl/registration/icp.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/filters/filter.h>
 #include <pcl/filters/voxel_grid.h>
@@ -56,6 +55,8 @@
 #include "aloam_velodyne/tic_toc.h"
 
 #include "scancontext/Scancontext.h"
+#include <quatro/quatro_module.h>
+#include <small_gicp/registration/registration_helper.hpp>
 
 using namespace gtsam;
 
@@ -106,6 +107,16 @@ noiseModel::Base::shared_ptr robustGPSNoise;
 pcl::VoxelGrid<PointType> downSizeFilterScancontext;
 SCManager scManager;
 double scDistThres, scMaximumRadius;
+
+double loopGicpDownsampleResolution;
+double loopGicpMaxCorrespondenceDistance;
+double loopGicpMaxRmse;
+double loopGicpMinOverlap;
+double loopGicpMaxCorrectionTranslation;
+double loopGicpMaxCorrectionRotationDeg;
+int loopGicpMinInliers;
+int loopGicpMaxIterations;
+int loopGicpNumThreads;
 
 pcl::VoxelGrid<PointType> downSizeFilterICP;
 std::mutex mtxICP;
@@ -529,36 +540,126 @@ std::optional<gtsam::Pose3> doICPVirtualRelative(int _loop_kf_idx, int _curr_kf_
     targetKeyframeCloudMsg.header.frame_id = "/camera_init";
     pubLoopSubmapLocal.publish(targetKeyframeCloudMsg);
 
-    // ICP Settings
-    pcl::IterativeClosestPoint<PointType, PointType> icp;
-    icp.setMaxCorrespondenceDistance(150); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter
-    icp.setMaximumIterations(100);
-    icp.setTransformationEpsilon(1e-6);
-    icp.setEuclideanFitnessEpsilon(1e-6);
-    icp.setRANSACIterations(0);
+    std::vector<Eigen::Vector3d> source_points;
+    std::vector<Eigen::Vector3d> target_points;
+    source_points.reserve(cureKeyframeCloud->size());
+    target_points.reserve(targetKeyframeCloud->size());
+    for (const auto &point : cureKeyframeCloud->points)
+        source_points.emplace_back(point.x, point.y, point.z);
+    for (const auto &point : targetKeyframeCloud->points)
+        target_points.emplace_back(point.x, point.y, point.z);
 
-    // Align pointclouds
-    icp.setInputSource(cureKeyframeCloud);
-    icp.setInputTarget(targetKeyframeCloud);
-    pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
-    icp.align(*unused_result);
+    small_gicp::RegistrationSetting gicp_setting;
+    gicp_setting.type = small_gicp::RegistrationSetting::GICP;
+    gicp_setting.downsampling_resolution = loopGicpDownsampleResolution;
+    gicp_setting.max_correspondence_distance = loopGicpMaxCorrespondenceDistance;
+    gicp_setting.max_iterations = loopGicpMaxIterations;
+    gicp_setting.num_threads = loopGicpNumThreads;
 
-    float loopFitnessScoreThreshold = 0.3; // user parameter but fixed low value is safe.
-    if (icp.hasConverged() == false || icp.getFitnessScore() > loopFitnessScoreThreshold)
+    auto registration_result = small_gicp::align(
+        target_points, source_points, Eigen::Isometry3d::Identity(), gicp_setting);
+
+    auto evaluate_registration = [&](const small_gicp::RegistrationResult &result,
+                                     double &rmse, double &overlap,
+                                     double &translation, double &rotation_deg)
     {
-        std::cout << "[SC loop] ICP fitness test failed (" << icp.getFitnessScore() << " > " << loopFitnessScoreThreshold << "). Reject this SC loop." << std::endl;
+        if (!result.T_target_source.matrix().allFinite())
+            return false;
+
+        pcl::KdTreeFLANN<PointType> target_tree;
+        target_tree.setInputCloud(targetKeyframeCloud);
+        std::vector<int> nearest_index(1);
+        std::vector<float> nearest_sq_distance(1);
+        const double max_distance_sq = loopGicpMaxCorrespondenceDistance *
+                                       loopGicpMaxCorrespondenceDistance;
+        std::size_t matched = 0;
+        double squared_error = 0.0;
+        for (const auto &point : cureKeyframeCloud->points)
+        {
+            const Eigen::Vector3d aligned = result.T_target_source *
+                                            Eigen::Vector3d(point.x, point.y, point.z);
+            PointType query;
+            query.x = aligned.x();
+            query.y = aligned.y();
+            query.z = aligned.z();
+            if (target_tree.nearestKSearch(query, 1, nearest_index, nearest_sq_distance) > 0 &&
+                nearest_sq_distance.front() <= max_distance_sq)
+            {
+                squared_error += nearest_sq_distance.front();
+                ++matched;
+            }
+        }
+
+        rmse = matched > 0 ? std::sqrt(squared_error / matched)
+                           : std::numeric_limits<double>::infinity();
+        overlap = cureKeyframeCloud->empty()
+                      ? 0.0
+                      : static_cast<double>(matched) / cureKeyframeCloud->size();
+        translation = result.T_target_source.translation().norm();
+        rotation_deg = rad2deg(Eigen::AngleAxisd(result.T_target_source.rotation()).angle());
+
+        return result.converged &&
+               result.num_inliers >= static_cast<std::size_t>(loopGicpMinInliers) &&
+               matched >= static_cast<std::size_t>(loopGicpMinInliers) &&
+               rmse <= loopGicpMaxRmse && overlap >= loopGicpMinOverlap &&
+               translation <= loopGicpMaxCorrectionTranslation &&
+               rotation_deg <= loopGicpMaxCorrectionRotationDeg;
+    };
+
+    double rmse = 0.0;
+    double overlap = 0.0;
+    double correction_translation = 0.0;
+    double correction_rotation_deg = 0.0;
+    bool registration_valid = evaluate_registration(
+        registration_result, rmse, overlap, correction_translation, correction_rotation_deg);
+
+    if (!registration_valid)
+    {
+        std::cout << "[SC loop] Direct GICP rejected (converged="
+                  << registration_result.converged << ", inliers="
+                  << registration_result.num_inliers << ", rmse=" << rmse
+                  << ", overlap=" << overlap << "). Trying Quatro initialization."
+                  << std::endl;
+
+        bool quatro_valid = false;
+        quatro<PointType> coarse_registration(
+            0.8, 1.5, 0.4, 1.39, 0.0001, 100, false, true, 30.0, 200);
+        const Eigen::Matrix4d quatro_transform = coarse_registration.align(
+            *cureKeyframeCloud, *targetKeyframeCloud, quatro_valid);
+        if (quatro_valid && quatro_transform.allFinite())
+        {
+            Eigen::Isometry3d initial_guess = Eigen::Isometry3d::Identity();
+            initial_guess.matrix() = quatro_transform;
+            registration_result = small_gicp::align(
+                target_points, source_points, initial_guess, gicp_setting);
+            registration_valid = evaluate_registration(
+                registration_result, rmse, overlap,
+                correction_translation, correction_rotation_deg);
+        }
+    }
+
+    if (!registration_valid)
+    {
+        std::cout << "[SC loop] Quatro+GICP verification failed (converged="
+                  << registration_result.converged << ", inliers="
+                  << registration_result.num_inliers << ", rmse=" << rmse
+                  << ", overlap=" << overlap << ", correction="
+                  << correction_translation << " m / " << correction_rotation_deg
+                  << " deg). Reject this SC loop." << std::endl;
         return std::nullopt;
     }
-    else
-    {
-        std::cout << "[SC loop] ICP fitness test passed (" << icp.getFitnessScore() << " < " << loopFitnessScoreThreshold << "). Add this SC loop." << std::endl;
-    }
 
-    // ICP returns the transform from the current scan in the global frame to
+    std::cout << "[SC loop] GICP verification passed (inliers="
+              << registration_result.num_inliers << ", rmse=" << rmse
+              << ", overlap=" << overlap << ", correction="
+              << correction_translation << " m / " << correction_rotation_deg
+              << " deg). Add this SC loop." << std::endl;
+
+    // GICP returns the transform from the current scan in the global frame to
     // the history submap in the global frame. Apply that correction to the
     // current pose, then express the corrected pose relative to the loop pose.
-    Eigen::Affine3f correction_global;
-    correction_global.matrix() = icp.getFinalTransformation();
+    Eigen::Affine3f correction_global = Eigen::Affine3f::Identity();
+    correction_global.matrix() = registration_result.T_target_source.matrix().cast<float>();
     const Eigen::Affine3f current_global = pcl::getTransformation(
         current_pose.x, current_pose.y, current_pose.z,
         current_pose.roll, current_pose.pitch, current_pose.yaw);
@@ -931,6 +1032,16 @@ int main(int argc, char **argv)
 
     nh.param<double>("sc_dist_thres", scDistThres, 0.2);
     nh.param<double>("sc_max_radius", scMaximumRadius, 80.0); // 80 is recommended for outdoor, and lower (ex, 20, 40) values are recommended for indoor
+
+    nh.param<double>("loop_gicp_downsample_resolution", loopGicpDownsampleResolution, 0.4);
+    nh.param<double>("loop_gicp_max_correspondence_distance", loopGicpMaxCorrespondenceDistance, 3.0);
+    nh.param<double>("loop_gicp_max_rmse", loopGicpMaxRmse, 0.5);
+    nh.param<double>("loop_gicp_min_overlap", loopGicpMinOverlap, 0.25);
+    nh.param<double>("loop_gicp_max_correction_translation", loopGicpMaxCorrectionTranslation, 10.0);
+    nh.param<double>("loop_gicp_max_correction_rotation_deg", loopGicpMaxCorrectionRotationDeg, 45.0);
+    nh.param<int>("loop_gicp_min_inliers", loopGicpMinInliers, 50);
+    nh.param<int>("loop_gicp_max_iterations", loopGicpMaxIterations, 64);
+    nh.param<int>("loop_gicp_num_threads", loopGicpNumThreads, 4);
 
     ISAM2Params parameters;
     parameters.relinearizeThreshold = 0.01;
